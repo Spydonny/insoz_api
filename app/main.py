@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.staticfiles import StaticFiles
 from app.routers import users, children
 from app.services.file_service import get_file_from_gridfs
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +16,9 @@ app.add_middleware(
 
 app.include_router(users.router)
 app.include_router(children.router)
+
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
 
 @app.get("/")
 async def root():

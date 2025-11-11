@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, Form, File, UploadFile
+from fastapi import APIRouter, Depends, Form, File, UploadFile, HTTPException, status
 from app.routers.users import get_current_user_id
 from app.services.child_service import *
-from app.services.file_service import save_file_to_gridfs
+from app.services.file_service import save_file_to_gridfs, upload_and_convert_to_wav
 from app.schemas.children import ChildDB, ChildCreate
 from typing import List
 
@@ -46,4 +46,69 @@ async def read_child_by_uuid(uuid: str):
     if not child:
         return {"error": "Child not found"}
     return child
+
+@router.post("/record/{uuid}", response_model=dict)
+async def add_record_to_child(
+    uuid: str,
+    record: UploadFile = File(...),
+    doctor_id: str = Depends(get_current_user_id),
+):
+    child = await get_child_by_uuid(uuid)
+    if not child:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Child not found"
+        )
+
+    if str(child.doctor_id) != doctor_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unauthorized access"
+        )
+
+    try:
+        record_path = await upload_and_convert_to_wav(record)
+        if not record_path:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to save record"
+            )
+        
+        updated_child = await add_record_to_child_in_db(uuid, record_path)
+        return updated_child
+
+    except HTTPException:
+        raise  # пробрасываем уже созданное исключение дальше
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при добавлении записи: {e}"
+        )
+
+@router.get("/record/{uuid}", response_model=list[ChildRecord])
+async def get_child_records(
+    uuid: str,
+    doctor_id: str = Depends(get_current_user_id),
+):
+    child = await get_child_by_uuid(uuid)
+    if not child:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Child not found"
+        )
+
+    if str(child.doctor_id) != doctor_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unauthorized access"
+        )
+
+    records = await get_child_records_by_uuid(uuid)
+    if records is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No records found for this child"
+        )
+
+    return records
 

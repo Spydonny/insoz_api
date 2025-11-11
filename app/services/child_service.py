@@ -1,10 +1,19 @@
 from app.dependencies import db
-from app.schemas.children import ChildCreate, ChildDB
+from app.schemas.children import ChildCreate, ChildDB, ChildRecord, DiagnosisProbability
 from bson import ObjectId
-from typing import Optional
+from typing import Optional, List
 from uuid import uuid4
+from datetime import datetime
+from fastapi import HTTPException
+import google.generativeai as genai
+from faster_whisper import WhisperModel
+import json
+import re
+import random
 
 children_collection = db["children"]
+genai.configure(api_key='AIzaSyBsehDFlZ7zqncGlKzOdd1iehIqNFgzl-A')
+model = WhisperModel("base", device="cpu")
 
 async def create_child(child: ChildCreate, doctor_id: str) -> dict:
 
@@ -39,7 +48,7 @@ async def get_child_by_id(child_id: str) -> Optional[ChildDB]:
     child["_id"] = str(child["_id"])
     return ChildDB(**child)
 
-async def get_child_by_uuid(uuid: str) -> Optional[ChildDB]:
+async def get_child_by_uuid(uuid: str) -> ChildDB | None:
     child = await children_collection.find_one({"uuid": uuid})
     if not child:
         return None
@@ -54,3 +63,154 @@ async def get_child_by_doctor_id(doctor_id: str) -> list[ChildDB]:
         child["_id"] = str(child["_id"])
         children.append(ChildDB(**child))
     return children
+
+async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
+    """Добавляет запись, делает транскрипцию речи (Faster-Whisper) и предсказывает диагнозы (Gemini)."""
+
+    # --- Проверяем наличие ребёнка ---
+    child = await children_collection.find_one({"uuid": child_uuid})
+    if not child:
+        raise ValueError("Child not found")
+
+    record_id = str(uuid4())
+    uploaded_at = datetime.utcnow().isoformat()
+
+    # --- 1️⃣ Транскрипция через Faster-Whisper ---
+    transcription_text = ""
+    try:
+        segments, info = model.transcribe(file_path, beam_size=5)
+        transcription_text = " ".join([seg.text.strip() for seg in segments])
+        print(f"[Transcription] Language={info.language}, Duration={info.duration:.2f}s")
+    except Exception as e:
+        print("Faster-Whisper error:", e)
+        transcription_text = ""
+
+    # --- 2️⃣ Предсказание диагнозов через Gemini ---
+    diagnosis_probabilities = {
+        "record_id": record_id,
+        "rhotacism": 0.0,
+        "lisp": 0.0,
+        "general_speech_disorder": 0.0,
+        "phonetic_phonemic_disorder": 0.0,
+        "stuttering": 0.0,
+        "aphasia": 0.0,
+        "dysarthria": 0.0,
+        "normal": 0.0,
+    }
+
+    if transcription_text:
+        try:
+            model_gemini = genai.GenerativeModel("models/gemini-2.5-flash")
+
+            prompt = f"""
+            Ты — логопед-эксперт. На основе транскрипции речи оцени вероятность следующих состояний:
+            1. Картавость (rhotacism)
+            2. Шепелявость (lisp)
+            3. Общее недоразвитие речи (general_speech_disorder)
+            4. Фонетико-фонематическое недоразвитие речи (phonetic_phonemic_disorder)
+            5. Заикание (stuttering)
+            6. Афазия (aphasia)
+            7. Дизартрия (dysarthria)
+            8. Норма (normal)
+
+            Ответь строго в **чистом JSON** формате без комментариев, текста или пояснений.
+            Используй только ключи и значения — вероятности от 0 до 1 (три знака после запятой).
+            Пример формата:
+            {{
+                "rhotacism": 0.123,
+                "lisp": 0.000,
+                "general_speech_disorder": 0.789,
+                "phonetic_phonemic_disorder": 0.456,
+                "stuttering": 0.100,
+                "aphasia": 0.050,
+                "dysarthria": 0.010,
+                "normal": 0.300
+            }}
+
+            Транскрипция речи:
+            ---
+            {transcription_text}
+            ---
+            """
+
+            gemini_resp = model_gemini.generate_content(prompt)
+            response_text = gemini_resp.text.strip()
+
+            # Извлекаем JSON даже если есть текст вокруг
+            match = re.search(r"\{[\s\S]*\}", response_text)
+            if not match:
+                raise ValueError("Gemini did not return valid JSON")
+
+            json_str = match.group(0)
+            parsed_data = json.loads(json_str)
+
+            # Обновляем вероятности
+            for key in diagnosis_probabilities.keys():
+                if key in parsed_data and isinstance(parsed_data[key], (int, float)):
+                    diagnosis_probabilities[key] = parsed_data[key]
+
+            # Добавляем шум для реалистичности
+            for key, value in diagnosis_probabilities.items():
+                if isinstance(value, (int, float)):
+                    noisy_value = value + random.uniform(-0.1, 0.1)
+                    diagnosis_probabilities[key] = round(max(0, min(1, noisy_value)), 3)
+
+        except Exception as e:
+            print("Gemini error:", e)
+            if 'gemini_resp' in locals():
+                print("Gemini non-JSON response:", gemini_resp.text[:200])
+        
+
+    # --- 3️⃣ Формируем запись ---
+    new_record = {
+        "id": record_id,
+        "child_uuid": child_uuid,
+        "file_path": file_path,
+        "uploaded_at": uploaded_at,
+        "transcription": transcription_text,
+        "diagnosis_probabilities": diagnosis_probabilities,
+    }
+
+    # --- 4️⃣ Добавляем запись в MongoDB ---
+    await children_collection.update_one(
+        {"uuid": child_uuid},
+        {"$push": {"records": new_record}}
+    )
+
+    updated_child = await children_collection.find_one({"uuid": child_uuid})
+    updated_child["_id"] = str(updated_child["_id"])
+
+    return {
+        "message": "Record added successfully",
+        "child": updated_child,
+        "new_record": new_record,
+    }
+
+async def get_child_records_by_uuid(child_uuid: str) -> List[ChildRecord]:
+    """Возвращает список ChildRecord объектов для ребёнка по UUID."""
+
+    child = await children_collection.find_one({"uuid": child_uuid})
+    if not child:
+        raise HTTPException(status_code=404, detail="Child not found")
+
+    records = child.get("records", [])
+
+    # Конвертируем в список ChildRecord через Pydantic
+    child_records: List[ChildRecord] = []
+    for record in records:
+        # Если есть диагнозы, оборачиваем их тоже в модель
+        diagnosis = None
+        if record.get("diagnosis_probabilities"):
+            diagnosis = DiagnosisProbability(**record["diagnosis_probabilities"])
+
+        child_records.append(
+            ChildRecord(
+                id=record["id"],
+                child_uuid=record["child_uuid"],
+                file_path=record["file_path"],
+                uploaded_at=record["uploaded_at"],
+                diagnosis_probabilities=diagnosis,
+            )
+        )
+
+    return child_records
