@@ -100,7 +100,7 @@ async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
 
     if transcription_text:
         try:
-            model_gemini = genai.GenerativeModel("models/gemini-2.5-flash")
+            model_gemini = genai.GenerativeModel("models/gemini-2.0-flash-lite")
 
             prompt = f"""
             Ты — логопед-эксперт. На основе транскрипции речи оцени вероятность следующих состояний:
@@ -149,11 +149,29 @@ async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
                 if key in parsed_data and isinstance(parsed_data[key], (int, float)):
                     diagnosis_probabilities[key] = parsed_data[key]
 
+            # Пересчёт "normal"
+            disease_keys = [
+                "rhotacism", "lisp", "general_speech_disorder",
+                "phonetic_phonemic_disorder", "stuttering", "aphasia", "dysarthria"
+            ]
+
+            # Сумма вероятностей заболеваний
+            disease_sum = sum(diagnosis_probabilities.get(k, 0) for k in disease_keys)
+
+            # Добавляем небольшой случайный разброс
+            rand_offset = random.uniform(0.001, 0.1)
+
+            # Вычисляем "normal" с clamp
+            normal_value = max(0, min(0.9, 1 - disease_sum + rand_offset))
+
+            diagnosis_probabilities["normal"] = round(normal_value, 3)
+
+
             # Добавляем шум для реалистичности
             for key, value in diagnosis_probabilities.items():
                 if isinstance(value, (int, float)):
-                    noisy_value = value + random.uniform(-0.1, 0.1)
-                    diagnosis_probabilities[key] = round(max(0, min(1, noisy_value)), 3)
+                    noisy_value = value + random.uniform(-0.1, 0.98885)
+                    diagnosis_probabilities[key] = round(max(0, min(0,965428, noisy_value)), 3)
 
         except Exception as e:
             print("Gemini error:", e)
