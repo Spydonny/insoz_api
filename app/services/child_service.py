@@ -100,7 +100,7 @@ async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
 
     if transcription_text:
         try:
-            model_gemini = genai.GenerativeModel("models/gemini-2.0-flash-lite")
+            model_gemini = genai.GenerativeModel("models/gemini-2.5-flash")
 
             prompt = f"""
             Ты — логопед-эксперт. На основе транскрипции речи оцени вероятность следующих состояний:
@@ -171,7 +171,7 @@ async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
             for key, value in diagnosis_probabilities.items():
                 if isinstance(value, (int, float)):
                     noisy_value = value + random.uniform(-0.1, 0.98885)
-                    diagnosis_probabilities[key] = round(max(0, min(0,965428, noisy_value)), 3)
+                    diagnosis_probabilities[key] = round(max(0, min(0.965428, noisy_value)), 3)
 
         except Exception as e:
             print("Gemini error:", e)
