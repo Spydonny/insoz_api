@@ -10,9 +10,13 @@ from faster_whisper import WhisperModel
 import json
 import re
 import random
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 children_collection = db["children"]
-genai.configure(api_key='AIzaSyBsehDFlZ7zqncGlKzOdd1iehIqNFgzl-A')
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 model = WhisperModel("base", device="cpu")
 
 async def create_child(child: ChildCreate, doctor_id: str) -> dict:

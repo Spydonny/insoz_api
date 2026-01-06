@@ -18,8 +18,10 @@ class ChildDB(ChildBase):
     uuid: UUID
     doctor_id: UUID
 
-    class Config:
-        orm_mode = True
+    model_config = {
+        "from_attributes": True
+    }
+
 
 class ChildRecord(BaseModel):
     id: UUID
