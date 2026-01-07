@@ -1,10 +1,10 @@
-# fly.toml app configuration file generated for insoz-api-silent-violet-8804 on 2026-01-07T17:45:07+05:00
+# fly.toml app configuration file generated for insoz-api on 2026-01-07T13:02:17Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'insoz-api-silent-violet-8804'
-primary_region = 'arn'
+app = 'insoz-api'
+primary_region = 'iad'
 
 [build]
   builder = 'paketobuildpacks/builder:base'
@@ -22,5 +22,6 @@ primary_region = 'arn'
 
 [[vm]]
   memory = '1gb'
+  cpu_kind = 'shared'
   cpus = 1
   memory_mb = 1024
