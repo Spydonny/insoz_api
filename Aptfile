@@ -1,8 +1,0 @@
-pkg-config
-ffmpeg
-libavcodec-dev
-libavformat-dev
-libavdevice-dev
-libavutil-dev
-libswscale-dev
-libswresample-dev

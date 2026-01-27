@@ -1,3 +1,4 @@
+from app.audio_model import get_audio_model
 from app.dependencies import db
 from app.schemas.children import ChildCreate, ChildDB, ChildRecord, DiagnosisProbability
 from bson import ObjectId
@@ -17,7 +18,15 @@ load_dotenv()
 
 children_collection = db["children"]
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = WhisperModel("base", device="cpu")
+
+_model = None
+
+def get_model():
+    global _model
+    if _model is None:
+        print("Loading Whisper model...")
+        _model = WhisperModel("base", device="cpu")
+    return _model
 
 async def create_child(child: ChildCreate, doctor_id: str) -> dict:
 
@@ -82,6 +91,7 @@ async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
     # --- 1️⃣ Транскрипция через Faster-Whisper ---
     transcription_text = ""
     try:
+        model = get_model()
         segments, info = model.transcribe(file_path, beam_size=5)
         transcription_text = " ".join([seg.text.strip() for seg in segments])
         print(f"[Transcription] Language={info.language}, Duration={info.duration:.2f}s")
@@ -101,6 +111,21 @@ async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
         "dysarthria": 0.0,
         "normal": 0.0,
     }
+
+    audio_probs = {}
+
+    try:
+        audio_model = get_audio_model()
+        audio_result = audio_model.analyze(file_path)
+
+        if "error" not in audio_result:
+            audio_probs = audio_result["all_probabilities"]
+            print("Audio model:", audio_probs)
+        else:
+            print("Audio model error:", audio_result["error"])
+
+    except Exception as e:
+        print("Audio model failed:", e)
 
     if transcription_text:
         try:
@@ -158,20 +183,10 @@ async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
                 "rhotacism", "lisp", "general_speech_disorder",
                 "phonetic_phonemic_disorder", "stuttering", "aphasia", "dysarthria"
             ]
-
-            # Сумма вероятностей заболеваний
             disease_sum = sum(diagnosis_probabilities.get(k, 0) for k in disease_keys)
-
-            # Добавляем небольшой случайный разброс
             rand_offset = random.uniform(0.001, 0.1)
-
-            # Вычисляем "normal" с clamp
             normal_value = max(0, min(0.9, 1 - disease_sum + rand_offset))
-
             diagnosis_probabilities["normal"] = round(normal_value, 3)
-
-
-            # Добавляем шум для реалистичности
             for key, value in diagnosis_probabilities.items():
                 if isinstance(value, (int, float)):
                     noisy_value = value + random.uniform(-0.1, 0.98885)
@@ -181,6 +196,12 @@ async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
             print("Gemini error:", e)
             if 'gemini_resp' in locals():
                 print("Gemini non-JSON response:", gemini_resp.text[:200])
+
+    if audio_probs:
+        diagnosis_probabilities["stuttering"] = round(audio_probs.get("stuttering", 0), 3)
+        diagnosis_probabilities["aphasia"] = round(audio_probs.get("aphasia", 0), 3)
+        diagnosis_probabilities["dysarthria"] = round(audio_probs.get("dysarthria", 0), 3)
+
         
 
     # --- 3️⃣ Формируем запись ---
