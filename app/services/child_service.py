@@ -1,4 +1,3 @@
-from app.audio_model import get_audio_model
 from app.dependencies import db
 from app.schemas.children import ChildCreate, ChildDB, ChildRecord, DiagnosisProbability
 from bson import ObjectId
@@ -6,7 +5,6 @@ from typing import Optional, List
 from uuid import uuid4
 from datetime import datetime
 from fastapi import HTTPException
-import google.generativeai as genai
 from faster_whisper import WhisperModel
 import json
 import re
@@ -17,7 +15,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 children_collection = db["children"]
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 _model = None
 
@@ -78,7 +75,12 @@ async def get_child_by_doctor_id(doctor_id: str) -> list[ChildDB]:
     return children
 
 async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
-    """Добавляет запись, делает транскрипцию речи (Faster-Whisper) и предсказывает диагнозы (Gemini)."""
+    """Добавляет запись, делает транскрипцию речи (Faster-Whisper) и оценивает вероятности.
+
+    Примечание:
+    - Gemini и локальная аудио-модель (torch/torchaudio/transformers) опциональны.
+      Если зависимости/ключи не установлены — сервис продолжит работу без них.
+    """
 
     # --- Проверяем наличие ребёнка ---
     child = await children_collection.find_one({"uuid": child_uuid})
@@ -114,7 +116,10 @@ async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
 
     audio_probs = {}
 
+    # --- 2️⃣ Аудио-модель (опционально; требует torch/torchaudio/transformers) ---
     try:
+        from app.audio_model import get_audio_model
+
         audio_model = get_audio_model()
         audio_result = audio_model.analyze(file_path)
 
@@ -125,10 +130,15 @@ async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
             print("Audio model error:", audio_result["error"])
 
     except Exception as e:
-        print("Audio model failed:", e)
+        # Не роняем запрос, если модель не установлена
+        print("Audio model skipped/failed:", e)
 
-    if transcription_text:
+    # --- 3️⃣ Gemini (опционально; требует google-generativeai + GEMINI_API_KEY) ---
+    if transcription_text and os.getenv("GEMINI_API_KEY"):
         try:
+            import google.generativeai as genai
+
+            genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
             model_gemini = genai.GenerativeModel("models/gemini-2.5-flash")
 
             prompt = f"""
@@ -193,8 +203,8 @@ async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
                     diagnosis_probabilities[key] = round(max(0, min(0.965428, noisy_value)), 3)
 
         except Exception as e:
-            print("Gemini error:", e)
-            if 'gemini_resp' in locals():
+            print("Gemini skipped/failed:", e)
+            if "gemini_resp" in locals():
                 print("Gemini non-JSON response:", gemini_resp.text[:200])
 
     if audio_probs:
