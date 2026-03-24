@@ -1,0 +1,35 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+
+# Python
+.venv
+env
+venv
+pip-wheel-metadata
+
+# Node
+node_modules
+npm-debug.log
+yarn.lock
+
+# Data / models / cache
+*.sqlite3
+data
+datasets
+models
+checkpoints
+media
+tmp
+logs
+
+# IDE
+.idea
+.vscode
+
+# OS
+.DS_Store
+
+
+fly.toml
