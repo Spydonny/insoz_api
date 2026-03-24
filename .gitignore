@@ -133,4 +133,6 @@ cython_debug/
 uploads/
 models/
 app/insoz.json
-speech_therapy_pdfs/
+speech_therapy_pdfs/venv/
+hubert_parquets/
+uploads/
