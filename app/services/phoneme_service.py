@@ -293,6 +293,7 @@ def analyze_phonemes(
             top_k=top_k,
         )
         best_similarity = normalize_similarity(analysis["best_similarity"])
+        best_similarity = max(0.0, (best_similarity - 0.5) * 2)
         score = similarity_to_score(best_similarity, max_score)
         scores[phoneme] = score
         results.append(
