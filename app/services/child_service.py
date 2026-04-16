@@ -260,6 +260,97 @@ async def save_ai_phoneme_analysis(
     )
     return await _save_phoneme_analysis(child_uuid, analysis_payload)
 
+def build_prompt(transcription: str) -> str:
+    prompt = f"""
+        Ты — эксперт по анализу речевых транскрипций (speech-language pathology + computational linguistics).
+
+        Твоя задача — оценить вероятность наличия типов речевых нарушений по текстовой транскрипции.
+
+        ⚠️ ВАЖНО:
+        - Ты НЕ ставишь диагноз.
+        - Ты не используешь медицинскую категоричность.
+        - Ты выполняешь многоклассовую вероятностную оценку по наблюдаемым речевым признакам.
+
+        ---
+
+        # 1. Классы:
+
+        - rhotacism (устойчивое нарушение /r/)
+        - lisp (нарушение свистящих и шипящих)
+        - general_speech_disorder (общее недоразвитие речи, бедная и упрощённая речь)
+        - phonetic_phonemic_disorder (системные фонологические/фонетические замены)
+        - stuttering (нарушение беглости речи: повторы, блоки, пролонгации)
+        - aphasia (нарушение языковой структуры: аграмматизмы, бессвязность, трудности построения фраз)
+        - dysarthria (моторное нарушение речи: смазанность, низкая артикуляционная чёткость)
+        - normal (отсутствие устойчивых нарушений)
+
+        ---
+
+        # 2. Извлечение признаков:
+
+        Определи наличие:
+        - фонетических замен (речь → искажённые фонемы)
+        - артикуляционных искажений
+        - пропусков звуков/слогов
+        - повторов (звуки, слоги, слова)
+        - пролонгаций звуков
+        - речевых блоков/паузации
+        - грамматических ошибок
+        - сниженной информативности речи
+        - нарушения связности текста
+
+        ---
+
+        # 3. Интерпретация признаков:
+
+        - rhotacism → изолированная проблема только /r/
+        - lisp → системные ошибки свистящих/шипящих
+        - phonetic_phonemic_disorder → множественные стабильные фонологические замены
+        - stuttering → дисфлюентность при сохранной языковой структуре
+        - dysarthria → сниженная артикуляционная чёткость + моторная нестабильность
+        - aphasia → нарушение грамматической и смысловой организации речи
+        - general_speech_disorder → бедная, упрощённая, но структурно сохранная речь
+        - normal → нет устойчивых патологических паттернов
+
+        ---
+
+        # 4. Ограничения модели:
+
+        - Вероятности должны быть в диапазоне [0, 1]
+        - Вернуть ВСЕ классы
+        - 3 знака после запятой
+        - Значения НЕ обязаны суммироваться в 1 (multi-label scoring)
+        - Но:
+        - если один класс высок (>0.6), конкурирующие типы должны быть низкими
+        - aphasia и normal не должны одновременно быть высокими
+        - dysarthria и normal не должны быть одновременно высокими
+        - stuttering и aphasia — слабо совместимы
+
+        ---
+
+        # 5. Формат ответа (СТРОГО JSON):
+
+        {{
+            "rhotacism": 0.000,
+            "lisp": 0.000,
+            "general_speech_disorder": 0.000,
+            "phonetic_phonemic_disorder": 0.000,
+            "stuttering": 0.000,
+            "aphasia": 0.000,
+            "dysarthria": 0.000,
+            "normal": 0.000
+        }}
+
+        ---
+
+        # 6. Вход:
+
+        Транскрипция:
+        ---
+        {transcription}
+        ---
+        """
+    return prompt
 
 async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
     child = await children_collection.find_one({"uuid": child_uuid})
@@ -273,11 +364,9 @@ async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
     try:
         model = get_model()
         segments, info = model.transcribe(file_path, beam_size=5)
-        transcription_text = " ".join([seg.text.strip() for seg in segments])
-        print(f"[Transcription] Language={info.language}, Duration={info.duration:.2f}s")
+        transcription_text = " ".join(seg.text.strip() for seg in segments)
     except Exception as e:
-        print("Faster-Whisper error:", e)
-        transcription_text = ""
+        print("Transcription error:", e)
 
     diagnosis_probabilities = {
         "record_id": record_id,
@@ -291,162 +380,60 @@ async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
         "normal": 0.0,
     }
 
-    audio_probs = {}
-
-    # try:
-    #     audio_model = get_audio_model()
-    #     audio_result = audio_model.analyze(file_path)
-    #
-    #     if "error" not in audio_result:
-    #         audio_probs = audio_result["all_probabilities"]
-    #         print("Audio model:", audio_probs)
-    #     else:
-    #         print("Audio model error:", audio_result["error"])
-    #
-    # except Exception as e:
-    #     print("Audio model failed:", e)
-
     if transcription_text:
         try:
             model_gemini = genai.GenerativeModel("models/gemini-2.5-flash")
 
-            prompt = f"""
-                Ты — эксперт-логопед и речевой аналитик с клиническим опытом.
+            prompt = build_prompt(transcription_text)  # вынеси промпт отдельно
 
-                Твоя задача — проанализировать транскрипцию речи и оценить вероятности речевых нарушений.
+            resp = model_gemini.generate_content(prompt)
+            text = resp.text
 
-                ⚠️ ВАЖНО:
-                Ты НЕ ставишь медицинский диагноз. Ты выполняешь вероятностную классификацию по текстовым признакам речи.
+            json_match = re.search(r"\{[\s\S]*\}", text)
+            if not json_match:
+                raise ValueError("Invalid JSON from model")
 
-                ---
+            raw = json.loads(json_match.group(0))
 
-                # 1. Возможные классы:
-
-                - rhotacism (картавость — нарушения звука "р")
-                - lisp (шепелявость — нарушения свистящих/шипящих)
-                - general_speech_disorder (общее недоразвитие речи)
-                - phonetic_phonemic_disorder (фонетико-фонематическое нарушение)
-                - stuttering (заикание)
-                - aphasia (афазия)
-                - dysarthria (дизартрия)
-                - normal (норма)
-
-                ---
-
-                # 2. Алгоритм анализа (обязательно соблюдай):
-
-                ## Шаг 1 — извлечение признаков речи:
-                Определи наличие следующих явлений:
-
-                - замены звуков (например, р → л, с → ш)
-                - искажения звуков (нечёткое произношение)
-                - пропуски звуков или слогов
-                - повторения слов/слогов
-                - растяжение звуков
-                - речевые блоки / паузы
-                - грамматические ошибки
-                - бедность речи
-                - нарушение связности текста
-
-                ---
-
-                ## Шаг 2 — сопоставление признаков:
-
-                - rhotacism → проблемы только с "р"
-                - lisp → проблемы свистящих/шипящих
-                - phonetic_phonemic_disorder → системные звуковые замены
-                - stuttering → повторы, блоки, растяжения
-                - dysarthria → смазанная, нечёткая артикуляция, множественные искажения
-                - aphasia → разрушение структуры речи, бессвязность
-                - general_speech_disorder → бедная, упрощённая речь
-                - normal → нет устойчивых нарушений
-
-                ---
-
-                # 3. Логические ограничения:
-
-                - Если stuttering > 0.3 → normal < 0.3
-                - Если aphasia > 0.3 → normal < 0.1
-                - Если dysarthria > 0.4 → phonetic_phonemic_disorder обычно ≥ 0.2
-                - Если явных ошибок нет → normal должен быть максимальным классом
-
-                ---
-
-                # 4. Правила вероятностей:
-
-                - Верни ВСЕ 8 классов
-                - Значения от 0 до 1
-                - Точность: 3 знака после запятой
-                - Сумма ВСЕХ значений = 1.000
-                - Без исключений
-                - Без дополнительных полей
-
-                ---
-
-                # 5. Формат ответа (СТРОГО JSON):
-
-                {{
-                    "rhotacism": 0.000,
-                    "lisp": 0.000,
-                    "general_speech_disorder": 0.000,
-                    "phonetic_phonemic_disorder": 0.000,
-                    "stuttering": 0.000,
-                    "aphasia": 0.000,
-                    "dysarthria": 0.000,
-                    "normal": 0.000
-                }}
-
-                ---
-
-                # 6. Входные данные:
-
-                Транскрипция речи:
-                ---
-                {transcription_text}
-                ---
-                """
-
-            gemini_resp = model_gemini.generate_content(prompt)
-            response_text = gemini_resp.text.strip()
-
-            match = re.search(r"\{[\s\S]*\}", response_text)
-            if not match:
-                raise ValueError("Gemini did not return valid JSON")
-
-            json_str = match.group(0)
-            parsed_data = json.loads(json_str)
-
-            for key in diagnosis_probabilities.keys():
-                if key in parsed_data and isinstance(parsed_data[key], (int, float)):
-                    diagnosis_probabilities[key] = parsed_data[key]
-
-            disease_keys = [
-                "rhotacism",
-                "lisp",
-                "general_speech_disorder",
-                "phonetic_phonemic_disorder",
-                "stuttering",
-                "aphasia",
-                "dysarthria",
-            ]
-            disease_sum = sum(diagnosis_probabilities.get(key, 0) for key in disease_keys)
-            rand_offset = random.uniform(0.001, 0.1)
-            normal_value = max(0, min(0.9, 1 - disease_sum + rand_offset))
-            diagnosis_probabilities["normal"] = round(normal_value, 3)
-            for key, value in diagnosis_probabilities.items():
-                if isinstance(value, (int, float)):
-                    noisy_value = value + random.uniform(-0.1, 0.98885)
-                    diagnosis_probabilities[key] = round(max(0, min(0.965428, noisy_value)), 3)
+            # 1. базовая загрузка без посторонней логики
+            for k in diagnosis_probabilities.keys():
+                if k in raw and isinstance(raw[k], (int, float)):
+                    diagnosis_probabilities[k] = float(raw[k])
 
         except Exception as e:
             print("Gemini error:", e)
-            if "gemini_resp" in locals():
-                print("Gemini non-JSON response:", gemini_resp.text[:200])
 
-    # if audio_probs:
-    #     diagnosis_probabilities["stuttering"] = round(audio_probs.get("stuttering", 0), 3)
-    #     diagnosis_probabilities["aphasia"] = round(audio_probs.get("aphasia", 0), 3)
-    #     diagnosis_probabilities["dysarthria"] = round(audio_probs.get("dysarthria", 0), 3)
+    # -----------------------------
+    # POST-PROCESSING (детерминированный)
+    # -----------------------------
+
+    disease_keys = [
+        "rhotacism",
+        "lisp",
+        "general_speech_disorder",
+        "phonetic_phonemic_disorder",
+        "stuttering",
+        "aphasia",
+        "dysarthria",
+    ]
+
+    disease_sum = sum(diagnosis_probabilities[k] for k in disease_keys)
+
+    # нормализация только если сумма > 1 (иначе не трогаем)
+    if disease_sum > 1.0:
+        for k in disease_keys:
+            diagnosis_probabilities[k] /= disease_sum
+
+    # normal как остаточная вероятность, без шума
+    diagnosis_probabilities["normal"] = max(
+        0.0,
+        min(1.0, 1.0 - sum(diagnosis_probabilities[k] for k in disease_keys))
+    )
+
+    # округление
+    for k in diagnosis_probabilities:
+        if isinstance(diagnosis_probabilities[k], float):
+            diagnosis_probabilities[k] = round(diagnosis_probabilities[k], 3)
 
     new_record = {
         "id": record_id,
