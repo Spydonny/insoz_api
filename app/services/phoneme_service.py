@@ -55,14 +55,27 @@ PHONEME_TO_LETTER = {
     "χ": "х",
 }
 
-feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(MODEL_NAME)
-model = HubertModel.from_pretrained(MODEL_NAME)
-model.to(DEVICE)
-model.eval()
-if DEVICE == "cuda":
-    model = model.half()
-else:
-    model = model.float()
+_feature_extractor: Wav2Vec2FeatureExtractor | None = None
+_model: HubertModel | None = None
+
+
+def get_hubert_components() -> tuple[Wav2Vec2FeatureExtractor, HubertModel]:
+    global _feature_extractor, _model
+
+    if _feature_extractor is None:
+        _feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(MODEL_NAME)
+
+    if _model is None:
+        model = HubertModel.from_pretrained(MODEL_NAME)
+        model.to(DEVICE)
+        model.eval()
+        if DEVICE == "cuda":
+            model = model.half()
+        else:
+            model = model.float()
+        _model = model
+
+    return _feature_extractor, _model
 
 
 def load_audio_from_url(url: str) -> torch.Tensor:
@@ -129,6 +142,7 @@ def augment_audio(wav: torch.Tensor) -> torch.Tensor:
 
 
 def get_hubert_embedding(wav: torch.Tensor) -> np.ndarray:
+    feature_extractor, model = get_hubert_components()
     inputs = feature_extractor(
         wav.numpy(),
         sampling_rate=TARGET_SR,

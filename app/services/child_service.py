@@ -38,6 +38,12 @@ def get_model():
         _model = WhisperModel("base", device="cpu")
     return _model
 
+def add_noise(value: float, noise_level: float = 0.05) -> float:
+    """
+    Adds small Gaussian-like noise and clamps result to [0, 1]
+    """
+    noise = random.uniform(-noise_level, noise_level)
+    return max(0.0, min(1.0, value + noise))
 
 async def create_child(child: ChildCreate, doctor_id: str) -> dict:
     new_child = child.dict()
@@ -303,7 +309,7 @@ def build_prompt(transcription: str) -> str:
 
         # 3. Интерпретация признаков:
 
-        - rhotacism → изолированная проблема только /r/
+        - rhotacism → изолированная проблема только /r/ 
         - lisp → системные ошибки свистящих/шипящих
         - phonetic_phonemic_disorder → множественные стабильные фонологические замены
         - stuttering → дисфлюентность при сохранной языковой структуре
@@ -403,8 +409,9 @@ async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
         except Exception as e:
             print("Gemini error:", e)
 
+
     # -----------------------------
-    # POST-PROCESSING (детерминированный)
+    # POST-PROCESSING (INDEPENDENT + NOISE)
     # -----------------------------
 
     disease_keys = [
@@ -417,23 +424,26 @@ async def add_record_to_child_in_db(child_uuid: str, file_path: str) -> dict:
         "dysarthria",
     ]
 
-    disease_sum = sum(diagnosis_probabilities[k] for k in disease_keys)
+    # применяем шум независимо к каждому классу
+    for k in disease_keys:
+        diagnosis_probabilities[k] = add_noise(
+            diagnosis_probabilities[k],
+            noise_level=0.04  # можно 0.02–0.06 по вкусу
+        )
 
-    # нормализация только если сумма > 1 (иначе не трогаем)
-    if disease_sum > 1.0:
-        for k in disease_keys:
-            diagnosis_probabilities[k] /= disease_sum
-
-    # normal как остаточная вероятность, без шума
-    diagnosis_probabilities["normal"] = max(
-        0.0,
-        min(1.0, 1.0 - sum(diagnosis_probabilities[k] for k in disease_keys))
+    # normal тоже НЕ зависит от суммы
+    diagnosis_probabilities["normal"] = add_noise(
+        diagnosis_probabilities["normal"],
+        noise_level=0.15
     )
 
-    # округление
+    # финальное ограничение диапазона
     for k in diagnosis_probabilities:
         if isinstance(diagnosis_probabilities[k], float):
-            diagnosis_probabilities[k] = round(diagnosis_probabilities[k], 3)
+            diagnosis_probabilities[k] = round(
+                max(0.0, min(1.0, diagnosis_probabilities[k])),
+                3
+        )
 
     new_record = {
         "id": record_id,
